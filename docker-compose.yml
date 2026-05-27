@@ -1,0 +1,65 @@
+# =============================================================================
+# OREE monitoring stack — docker-compose
+# Services: PostgreSQL 16 (data) + Grafana (dashboards)
+# The collector runs on the HOST via systemd timer (see oree-collector.*),
+# connecting to Postgres on localhost:5432.
+#
+# Start:   docker compose up -d
+# Logs:    docker compose logs -f
+# Stop:    docker compose down   (data persists in named volumes)
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: oree_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: oree
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in .env}
+      POSTGRES_DB: oree
+      # tuning for 8 GB RAM box shared with other workloads
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=1GB"
+      - "-c"
+      - "effective_cache_size=3GB"
+      - "-c"
+      - "work_mem=32MB"
+      - "-c"
+      - "maintenance_work_mem=256MB"
+      - "-c"
+      - "max_connections=50"
+    ports:
+      - "127.0.0.1:5432:5432"      # bind to localhost only — not exposed to internet
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oree -d oree"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: oree_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_PASSWORD:?set GF_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "http://localhost:3000"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"      # localhost only — reach via SSH tunnel
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  grafana_data:

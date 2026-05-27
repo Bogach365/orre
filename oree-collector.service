@@ -1,0 +1,42 @@
+# =============================================================================
+# systemd units — install both files into /etc/systemd/system/
+#   sudo cp oree-collector.service oree-collector.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now oree-collector.timer
+# Verify:
+#   systemctl list-timers 'oree-collector*'
+#   journalctl -u oree-collector.service -n 50 --no-pager
+# Test now:
+#   sudo systemctl start oree-collector.service
+# =============================================================================
+
+# ======================= oree-collector.service =============================
+[Unit]
+Description=OREE DAM daily collector (T-1)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=oree
+ExecStart=/home/oree/oree/run_daily.sh
+# Don't hammer if it fails — timer will retry next day
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
+
+
+# ======================= oree-collector.timer ===============================
+# Save the block below as a SEPARATE file: oree-collector.timer
+#
+# [Unit]
+# Description=Run OREE collector daily at 14:30 Kyiv
+#
+# [Timer]
+# OnCalendar=*-*-* 14:30:00
+# Persistent=true          # if server was off at 14:30, run on next boot
+# RandomizedDelaySec=300   # spread load, polite to OREE
+#
+# [Install]
+# WantedBy=timers.target

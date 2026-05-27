@@ -1,0 +1,10 @@
+[Unit]
+Description=Run OREE collector daily at 14:30 Kyiv
+
+[Timer]
+OnCalendar=*-*-* 14:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
