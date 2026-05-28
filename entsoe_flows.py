@@ -100,27 +100,47 @@ def parse_flows(xml_text, border, direction):
         if period.tag.split("}")[-1] != "Period":
             continue
         start_el = period.find(f"{NS}timeInterval/{NS}start")
+        end_el = period.find(f"{NS}timeInterval/{NS}end")
         res_el = period.find(f"{NS}resolution")
         if start_el is None or res_el is None:
             continue
         start = _parse_dt(start_el.text)
+        end = _parse_dt(end_el.text) if end_el is not None else None
         if start is None:
             continue
         mm = re.search(r"PT(\d+)M", res_el.text or "")
         step = int(mm.group(1)) if mm else 60
+
+        # listed points (A03 = sparse: value holds from its position until the next)
+        pts = {}
         for pt in period.findall(f"{NS}Point"):
             pos_el = pt.find(f"{NS}position")
             q_el = pt.find(f"{NS}quantity")
             if pos_el is None or q_el is None or q_el.text is None:
                 continue
             try:
-                pos = int(pos_el.text)
-                val = float(q_el.text)
+                pts[int(pos_el.text)] = float(q_el.text)
             except (TypeError, ValueError):
+                continue
+        if not pts:
+            continue
+
+        # number of slots in the period grid (so a single A03 point fills the whole span)
+        if end is not None:
+            n = int((end - start).total_seconds() // (step * 60))
+        else:
+            n = max(pts)
+        n = max(n, max(pts))
+
+        cur = None
+        for pos in range(1, n + 1):
+            if pos in pts:
+                cur = pts[pos]
+            if cur is None:
                 continue
             dt_utc = start + timedelta(minutes=step * (pos - 1))
             loc = dt_utc.astimezone(KYIV)
-            acc.setdefault((loc.date(), loc.hour), []).append(val)
+            acc.setdefault((loc.date(), loc.hour), []).append(cur)
     return [(d, h, border, direction, sum(v) / len(v)) for (d, h), v in acc.items()]
 
 
