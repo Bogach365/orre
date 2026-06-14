@@ -1,6 +1,6 @@
 # =============================================================================
 # OREE monitoring stack — docker-compose
-# Services: PostgreSQL 16 (data) + Grafana (dashboards)
+# Services: PostgreSQL 16 (data) + Grafana (dashboards) + n8n (automation)
 # The collector runs on the HOST via systemd timer (see oree-collector.*),
 # connecting to Postgres on localhost:5432.
 #
@@ -60,6 +60,30 @@ services:
       postgres:
         condition: service_healthy
 
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: oree_n8n
+    restart: unless-stopped
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: admin
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD:?set N8N_PASSWORD in .env}
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://localhost:5678
+      GENERIC_TIMEZONE: Europe/Kyiv
+      TZ: Europe/Kyiv
+      N8N_LOG_LEVEL: warn
+    ports:
+      - "127.0.0.1:5678:5678"      # localhost only — reach via SSH tunnel
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
   grafana_data:
+  n8n_data:
