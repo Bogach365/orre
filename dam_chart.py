@@ -44,40 +44,33 @@ def query(sql):
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     rows = []
     for line in r.stdout.strip().split("\n"):
-        if line.strip():
-            rows.append(line.split("\t"))
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        # Пропускаємо рядки де всі поля NULL або порожні (немає даних)
+        if all(p in ("", "\\N") for p in parts):
+            continue
+        rows.append(parts)
     return rows
 
 
 def get_hourly(date_str):
     rows = query(f"""
-        SELECT c.delivery_hour,
-               ROUND(c.buy_price::numeric,0),
-               ROUND(c.sell_price::numeric,0),
-               ROUND(MAX(cv.cum_volume)::numeric,1) as vol_buy,
-               ROUND(MAX(cv2.cum_volume)::numeric,1) as vol_sell
-        FROM dam_clearing c
-        LEFT JOIN dam_curves cv ON cv.delivery_date=c.delivery_date
-            AND cv.delivery_hour=c.delivery_hour AND cv.zone=c.zone AND cv.side='B'
-            AND cv.step_idx=(SELECT MAX(step_idx) FROM dam_curves 
-                             WHERE delivery_date=c.delivery_date 
-                             AND delivery_hour=c.delivery_hour AND zone=c.zone AND side='B')
-        LEFT JOIN dam_curves cv2 ON cv2.delivery_date=c.delivery_date
-            AND cv2.delivery_hour=c.delivery_hour AND cv2.zone=c.zone AND cv2.side='S'
-            AND cv2.step_idx=(SELECT MAX(step_idx) FROM dam_curves 
-                              WHERE delivery_date=c.delivery_date 
-                              AND delivery_hour=c.delivery_hour AND zone=c.zone AND side='S')
-        WHERE c.delivery_date='{date_str}' AND c.zone='IPS'
-        GROUP BY c.delivery_hour, c.buy_price, c.sell_price
-        ORDER BY c.delivery_hour
+        SELECT delivery_hour,
+               ROUND(buy_price::numeric,0),
+               ROUND(sell_price::numeric,0),
+               ROUND(cleared_volume::numeric,1)
+        FROM dam_clearing
+        WHERE delivery_date='{date_str}' AND zone='IPS'
+        ORDER BY delivery_hour
     """)
     if not rows or not rows[0][0]:
         return [], [], [], [], []
     hours = [int(r[0]) for r in rows]
     buy   = [float(r[1]) for r in rows]
     sell  = [float(r[2]) for r in rows]
-    vol_b = [float(r[3]) if r[3] and r[3]!='\\N' else 0 for r in rows]
-    vol_s = [float(r[4]) if r[4] and r[4]!='\\N' else 0 for r in rows]
+    vol_b = [float(r[3]) if r[3] and r[3] not in ('\\N', '') else 0 for r in rows]
+    vol_s = vol_b  # клірингований обсяг однаковий для купівлі і продажу
     return hours, buy, sell, vol_b, vol_s
 
 
@@ -88,16 +81,24 @@ def get_stats(date_str):
                ROUND(MIN(buy_price)::numeric,0),
                ROUND(MAX(buy_price)::numeric,0),
                ROUND(MAX(sell_price)::numeric,0),
-               COUNT(*)
+               COUNT(*),
+               ROUND(SUM(cleared_volume)::numeric,0)
         FROM dam_clearing
         WHERE delivery_date='{date_str}' AND zone='IPS'
     """)
     if not rows or not rows[0][0]:
         return None
     r = rows[0]
+    vol = None
+    if len(r) > 6 and r[6] not in ("", "\\N", None):
+        try:
+            vol = float(r[6])
+        except (ValueError, TypeError):
+            vol = None
     return {"avg_buy": float(r[0]), "avg_sell": float(r[1]),
             "min_buy": float(r[2]), "max_buy": float(r[3]),
-            "max_sell": float(r[4]), "hours": int(r[5])}
+            "max_sell": float(r[4]), "hours": int(r[5]),
+            "volume": vol}
 
 
 def get_peak_offpeak(date_str):
@@ -400,14 +401,16 @@ def main():
     y_str  = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     p_str  = (today - timedelta(days=2)).strftime("%Y-%m-%d")
     w_str  = (today - timedelta(days=8)).strftime("%Y-%m-%d")
+    yr_str = (today - timedelta(days=1) - timedelta(days=365)).strftime("%Y-%m-%d")
     weekday_name = (today - timedelta(days=1)).strftime("%A")
 
     print(f"Processing {y_str}...")
 
-    stats  = get_stats(y_str)
+    stats   = get_stats(y_str)
     stats_p = get_stats(p_str)
     stats_w = get_stats(w_str)
-    pp     = get_peak_offpeak(y_str)
+    stats_yr = get_stats(yr_str)
+    pp      = get_peak_offpeak(y_str)
     avg_30d, _ = get_30d_avg()
 
     if not stats:
@@ -417,44 +420,74 @@ def main():
     hours_y, buy_y, _, _, _ = get_hourly(y_str)
     spikes = analyze_spikes(hours_y, buy_y, avg_30d)
 
-    # ── Підпис до графіку 1 ──
     def diff_arrow(a, b):
         if not b:
-            return ""
+            return "н/д"
         d = pct(a, b)
-        return f"{'📈' if d>0 else '📉'} {d:+.1f}%"
+        return f"{'📈' if d>0 else '📉'} {d:+.1f}% ({b:,.0f}→{a:,.0f})"
+
+    def diff_vol(a, b):
+        if not a or not b:
+            return "н/д"
+        d = pct(a, b)
+        return f"{'📈' if d>0 else '📉'} {d:+.1f}% ({b:,.0f}→{a:,.0f} МВт·год)"
 
     peak_d  = pp.get("peak", {})
     offp_d  = pp.get("offpeak", {})
+    vol     = stats.get("volume")
 
-    cap1_lines = [
-        f"📊 РДН ОREE | {y_str} | {weekday_name}\n",
+    # ── ТЕКСТОВИЙ ЗВІТ (ціни + обсяги + повне порівняння) ──
+    report_lines = [
+        f"📊 РДН ОREE | {y_str} | {weekday_name}",
         f"{'─'*32}",
-        f"⚡ BASE   купівля: {stats['avg_buy']:>7,.0f} грн  продаж: {stats['avg_sell']:>7,.0f} грн",
-        f"🌅 PEAK   купівля: {peak_d.get('avg_buy',0):>7,.0f} грн  продаж: {peak_d.get('avg_sell',0):>7,.0f} грн",
-        f"🌙 OFFPEAK купівля: {offp_d.get('avg_buy',0):>7,.0f} грн  продаж: {offp_d.get('avg_sell',0):>7,.0f} грн",
+        f"💰 Сер. ціна купівлі:  {stats['avg_buy']:>9,.0f} грн/МВт·год",
+        f"💸 Сер. ціна продажу:  {stats['avg_sell']:>9,.0f} грн/МВт·год",
+        f"⬇️ Мін: {stats['min_buy']:,.0f}   ⬆️ Макс: {stats['max_buy']:,.0f} грн",
+    ]
+    if vol:
+        report_lines.append(f"⚡ Клірингований обсяг: {vol:>9,.0f} МВт·год")
+    report_lines += [
         f"{'─'*32}",
-        f"⬇️ Мін: {stats['min_buy']:,.0f}  ⬆️ Макс: {stats['max_buy']:,.0f} грн",
-        f"\n📈 Порівняння (base):",
+        f"🌅 PEAK (8-20):    {peak_d.get('avg_buy',0):>8,.0f} грн",
+        f"🌙 OFFPEAK (21-7): {offp_d.get('avg_buy',0):>8,.0f} грн",
+        f"{'─'*32}",
+        "📈 Порівняння ціни (купівля):",
         f"  vs позавчора:     {diff_arrow(stats['avg_buy'], stats_p['avg_buy'] if stats_p else None)}",
         f"  vs тиждень тому:  {diff_arrow(stats['avg_buy'], stats_w['avg_buy'] if stats_w else None)}",
+        f"  vs рік тому:      {diff_arrow(stats['avg_buy'], stats_yr['avg_buy'] if stats_yr else None)}",
         f"  vs 30д середня:   {diff_arrow(stats['avg_buy'], avg_30d)}",
     ]
+    if vol and stats_p and stats_p.get("volume"):
+        report_lines += [
+            "",
+            "📦 Порівняння обсягу:",
+            f"  vs позавчора:     {diff_vol(vol, stats_p.get('volume'))}",
+        ]
+        if stats_w and stats_w.get("volume"):
+            report_lines.append(f"  vs тиждень тому:  {diff_vol(vol, stats_w.get('volume'))}")
+        if stats_yr and stats_yr.get("volume"):
+            report_lines.append(f"  vs рік тому:      {diff_vol(vol, stats_yr.get('volume'))}")
+
     if spikes:
-        cap1_lines += ["\n⚠️ Аномалії:"] + [f"  {s}" for s in spikes]
-    cap1_lines.append("\n#РДН #ОREE #Електроенергія")
-    caption1 = "\n".join(cap1_lines)
+        report_lines += ["", "⚠️ Аномалії:"] + [f"  {s}" for s in spikes]
+    report_lines.append("\n#РДН #ОREE #Електроенергія #Україна")
+    report_text = "\n".join(report_lines)
 
+    print("Sending text report...")
+    send_text(report_text)
+
+    # ── Підписи до графіків (короткі) ──
+    cap1 = (f"📊 Погодинні ціни та обсяги | {y_str}\n"
+            f"Купівля: {stats['avg_buy']:,.0f} грн | Продаж: {stats['avg_sell']:,.0f} грн")
     cap2 = (f"📊 Peak/Base/Off-Peak + 21-денний тренд | {y_str}\n"
-            f"Peak avg: {peak_d.get('avg_buy',0):,.0f} грн | "
-            f"Off-Peak avg: {offp_d.get('avg_buy',0):,.0f} грн | "
-            f"Спред Peak/OffPeak: {abs(peak_d.get('avg_buy',0)-offp_d.get('avg_buy',0)):,.0f} грн")
+            f"Peak: {peak_d.get('avg_buy',0):,.0f} грн | "
+            f"Off-Peak: {offp_d.get('avg_buy',0):,.0f} грн | "
+            f"Спред: {abs(peak_d.get('avg_buy',0)-offp_d.get('avg_buy',0)):,.0f} грн")
 
-    # Будуємо і надсилаємо графіки
     print("Building chart 1: hourly prices + volumes...")
     buf1 = chart_hourly(y_str, p_str, w_str, avg_30d)
     if buf1:
-        send_photo(buf1, caption1)
+        send_photo(buf1, cap1)
         print("Chart 1 sent")
 
     print("Building chart 2: products + trend...")
