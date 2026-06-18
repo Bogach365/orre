@@ -1,0 +1,7 @@
+.env
+.venv/
+raw/
+raw_idm/
+*.log
+__pycache__/
+*.pyc

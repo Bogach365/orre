@@ -52,7 +52,7 @@ MAX_RETRIES = 4
 BACKOFF = 2.0
 
 # поля, які НЕ є вимірами (решту складаємо в dims)
-STD = {"dt", "txt", "txten", "id_api", "leveli", "parent", "freq", "value", "tzep"}
+STD = {"dt", "txt", "txten", "id_api", "freq", "value"}
 
 DDL = """
 CREATE TABLE IF NOT EXISTS nbu_macro (
@@ -100,7 +100,7 @@ def parse_block(block, payload):
         if not isinstance(it, dict):
             continue
         try:
-            d = datetime.strptime(it.get("dt"), "%d.%m.%Y").date()
+            d = datetime.strptime(it.get("dt"), "%Y%m%d").date()
         except (TypeError, ValueError):
             continue
         txt = it.get("txt")
