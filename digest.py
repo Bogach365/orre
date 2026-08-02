@@ -33,6 +33,17 @@ RSS_FEEDS = [
     ("okte",    "https://www.okte.sk/en/rss",                  False),
 ]
 
+
+TG_CHANNELS = [
+    ("gerus",      "gerus_online"),
+    ("zheleznyak", "yzheleznyak"),
+    ("toku",       "tokukraine"),
+    ("energozhinka","energozhinka21"),
+    ("nkrekp",     "nkrekp_official"),
+    ("ukrenergo",  "ukrenergo"),
+    ("enkorr",     "enkorr"),
+]
+
 # Сторінки для scraping (парсимо заголовки <h2>)
 SCRAPE_PAGES = [
     ("nemo",     "https://nemo-committee.eu/publications",      "https://nemo-committee.eu"),
@@ -63,11 +74,17 @@ USER_PROMPT = """Підготуй щоденний дайджест на осн�
 🌱 ВІДНОВЛЮВАНА ЕНЕРГЕТИКА
 [сонце, вітер, накопичення]
 
+🇺🇦 УКРАЇНА (Telegram: Герус, Железняк, НКРЕКП, Укренерго)
+[ключові повідомлення українських лідерів думок та регуляторів за останню добу]
+
 ⚠️ НА РАДАРІ
 [що може розвинутись найближчими днями]
 
 📎 ДЖЕРЕЛА
 [список URL]
+
+Важливо: після кожної новини вказуй посилання у форматі:
+🔗 https://...
 
 Обсяг: до 800 слів. Мова: українська."""
 
@@ -171,6 +188,57 @@ def scrape_page(name, url, base_url):
 
 
 # ── Claude API ───────────────────────────────────────────────────────────────
+
+def fetch_tg_channel(name, channel):
+    """Парсить останні пости з публічного Telegram каналу."""
+    html = fetch_url(name, f"https://t.me/s/{channel}")
+    if not html:
+        return []
+    items = []
+    seen = set()
+    import re as _re
+    # Витягуємо блоки повідомлень
+    blocks = _re.findall(
+        r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+        html, _re.DOTALL
+    )
+    # Витягуємо дати
+    dates = _re.findall(
+        r'<time[^>]*datetime="([^"]+)"',
+        html
+    )
+    # Витягуємо посилання на пости
+    links = _re.findall(
+        r'<a class="tgme_widget_message_date"[^>]*href="([^"]+)"',
+        html
+    )
+    from datetime import datetime, timezone, timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=36)
+    
+    for i, block in enumerate(blocks[-10:]):
+        # Очищаємо HTML теги
+        text = _re.sub(r'<[^>]+>', '', block)
+        text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#33;', '!')
+        text = _re.sub(r'\s+', ' ', text).strip()
+        if not text or len(text) < 20 or text in seen:
+            continue
+        seen.add(text)
+        # Дата поста
+        date_str = dates[-(10-i)] if i < len(dates) else ""
+        try:
+            post_dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            if post_dt < cutoff:
+                continue
+        except Exception:
+            pass
+        # Посилання
+        link = links[-(10-i)] if i < len(links) else f"https://t.me/{channel}"
+        title = text[:120] + "..." if len(text) > 120 else text
+        items.append({"title": title, "url": link, "summary": f"Telegram @{channel}", "pub": date_str})
+    
+    print(f"  [tg:{name}] {len(items)} posts")
+    return items
+
 def call_claude(news_text, count):
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
@@ -234,7 +302,16 @@ def main():
                 all_items.append(item)
         print(f"  [{name}] {len(items)} items")
 
-    # 2. Scraping сторінок
+    # 2. Telegram канали (українська енергетика)
+    print("Fetching Telegram channels...")
+    for name, channel in TG_CHANNELS:
+        items = fetch_tg_channel(name, channel)
+        for item in items:
+            if item["title"] not in seen_titles:
+                seen_titles.add(item["title"])
+                all_items.append(item)
+
+    # 2b. Scraping сторінок
     print("Scraping pages...")
     for name, url, base_url in SCRAPE_PAGES:
         items = scrape_page(name, url, base_url)
