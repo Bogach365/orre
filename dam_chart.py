@@ -359,30 +359,21 @@ def chart_products(y_str, avg_30d):
 
 # ── Telegram ─────────────────────────────────────────────────────────────────
 def send_photo(img_buf, caption):
-    boundary = b"----Boundary7MA4YW"
-    body = (
-        b"--" + boundary + b"\r\n"
-        b'Content-Disposition: form-data; name="chat_id"\r\n\r\n' +
-        TG_CHAT.encode() + b"\r\n"
-        b"--" + boundary + b"\r\n"
-        b'Content-Disposition: form-data; name="caption"\r\n\r\n' +
-        caption.encode("utf-8") + b"\r\n"
-        b"--" + boundary + b"\r\n"
-        b'Content-Disposition: form-data; name="photo"; filename="chart.png"\r\n'
-        b"Content-Type: image/png\r\n\r\n" +
-        img_buf.read() + b"\r\n"
-        b"--" + boundary + b"--\r\n"
-    )
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
-        data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary.decode()}"},
-        method="POST"
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read()).get("ok", False)
-
-
+    import tempfile, os, subprocess as sp
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    tmp.write(img_buf.read())
+    tmp.close()
+    cmd = ["curl", "-s", "-X", "POST",
+           f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+           "-F", f"chat_id={TG_CHAT}",
+           "-F", f"caption={caption}",
+           "-F", f"photo=@{tmp.name}"]
+    r = sp.run(cmd, capture_output=True, text=True, timeout=60)
+    os.unlink(tmp.name)
+    try:
+        return json.loads(r.stdout).get("ok", False)
+    except Exception:
+        return False
 def send_text(text):
     payload = json.dumps({"chat_id": TG_CHAT, "text": text}).encode()
     req = urllib.request.Request(
@@ -472,6 +463,18 @@ def main():
         if stats_yr and stats_yr.get("volume"):
             report_lines.append(f"  vs рік тому:      {diff_vol(vol, stats_yr.get('volume'))}")
 
+    # УЄББ блок
+    ueex = get_ueex_comparison(y_str)
+    if ueex:
+        diff_sign = "📈" if ueex["diff"] > 0 else "📉"
+        report_lines += [
+            "",
+            f"🏦 УЄББ vs OREE | {ueex['label']}:",
+            f"  Форвард УЄББ: {ueex['ueex']:>7,.0f} грн",
+            f"  Факт OREE:    {ueex['oree']:>7,.0f} грн",
+            f"  Відхилення:   {diff_sign} {ueex['diff']:>+,.0f} грн ({ueex['days']} дн.)",
+        ]
+
     if spikes:
         report_lines += ["", "⚠️ Аномалії:"] + [f"  {s}" for s in spikes]
     report_lines.append("\n#РДН #ОREE #Електроенергія #Україна")
@@ -503,5 +506,39 @@ def main():
     print("Done!")
 
 
+# ── УЄББ порівняння (додано) ─────────────────────────
+def get_ueex_comparison(date_str):
+    """Порівняння УЄББ форвард vs OREE факт для поточної декади."""
+    rows = query(f"""
+        SELECT u.period_label,
+               ROUND(u.price_avg::numeric,0) as ueex,
+               ROUND(AVG(d.buy_price)::numeric,0) as oree,
+               ROUND((AVG(d.buy_price)-u.price_avg)::numeric,0) as diff,
+               COUNT(DISTINCT d.delivery_date) as days
+        FROM ueex_decade_index u
+        JOIN dam_clearing d ON d.zone='IPS'
+          AND EXTRACT(YEAR FROM d.delivery_date)=u.year_num
+          AND EXTRACT(MONTH FROM d.delivery_date)=u.month_num
+          AND CEIL(EXTRACT(DAY FROM d.delivery_date)/10.0)=u.decade_num
+        WHERE d.delivery_date <= '{date_str}'
+          AND u.period_label = (
+            SELECT period_label FROM ueex_decade_index
+            WHERE year_num=EXTRACT(YEAR FROM '{date_str}'::date)
+              AND month_num=EXTRACT(MONTH FROM '{date_str}'::date)
+              AND decade_num=CEIL(EXTRACT(DAY FROM '{date_str}'::date)/10.0)
+          )
+        GROUP BY u.period_label, u.price_avg
+        LIMIT 1
+    """)
+    if not rows or len(rows[0]) < 4:
+        return None
+    r = rows[0]
+    return {
+        "label": r[0],
+        "ueex":  float(r[1]),
+        "oree":  float(r[2]),
+        "diff":  float(r[3]),
+        "days":  int(r[4]) if len(r) > 4 else 0,
+    }
 if __name__ == "__main__":
     main()
