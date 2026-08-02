@@ -393,11 +393,12 @@ def main():
         sys.exit(1)
 
     today        = datetime.now()
-    y_str  = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    rows = query("SELECT MAX(delivery_date) FROM dam_clearing WHERE zone='IPS'")
+    y_str  = rows[0][0] if rows else today.strftime("%Y-%m-%d")
     p_str  = (today - timedelta(days=2)).strftime("%Y-%m-%d")
     w_str  = (today - timedelta(days=8)).strftime("%Y-%m-%d")
     yr_str = (today - timedelta(days=1) - timedelta(days=365)).strftime("%Y-%m-%d")
-    weekday_name = (today - timedelta(days=1)).strftime("%A")
+    weekday_name = today.strftime("%A")
 
     print(f"Processing {y_str}...")
 
